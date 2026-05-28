@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
+from sklearn.metrics import (accuracy_score, balanced_accuracy_score, f1_score, precision_score, recall_score, roc_auc_score, confusion_matrix)
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
 from tqdm.auto import tqdm
@@ -50,27 +50,48 @@ def get_args(argv=None):
         default=str(Path.cwd()),
     )
 
+    # Experimental settings.
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--encoder', type=str, default='vision')
     parser.add_argument('--num_classes', type=int, default=3)
     parser.add_argument('--num_workers', type=int, default=0)
 
-    parser.add_argument('--lora_layers', type=int, default=None)
+    # LoRA settings.
+    parser.add_argument('--lora_layers', type=int, default=None) # Note: lora_layers = None adapts all transformer blocks.
     parser.add_argument('--lora_rank', type=int, default=16)
     parser.add_argument('--lora_alpha', type=int, default=32)
     parser.add_argument('--lora_dropout', type=float, default=0.1)
 
-    parser.add_argument('--epochs', type=int, default=30)
+    # Target attention projections for the different model types.
+    parser.add_argument('--clip_lora_targets', nargs='+', default=['q', 'k', 'v', 'o'])
+    parser.add_argument('--biomed_lora_targets', nargs='+', default=['qkv', 'proj'])
+
+    # Training settings for the LoRA adapters and classification head.
+    parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--batch_size', type=int, default=8)
+
+    # Learning rates.
     parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--lr_min', type=float, default=1e-8)
-    parser.add_argument('--weight_decay', type=float, default=0.01)
+    parser.add_argument('--head_lr', type=float, default=1e-3)
+    parser.add_argument('--lora_lr', type=float, default=1e-4)
+    parser.add_argument('--lr_min', type=float, default=1e-7)
+
+    # Optimisation settings.
+    parser.add_argument('--weight_decay', type=float, default=0.0)
+    parser.add_argument('--head_weight_decay', type=float, default=0.0)
+    parser.add_argument('--lora_weight_decay', type=float, default=0.0)
     parser.add_argument('--beta1', type=float, default=0.9)
     parser.add_argument('--beta2', type=float, default=0.95)
-    parser.add_argument('--patience', type=int, default=15)
+    parser.add_argument('--patience', type=int, default=25)
     parser.add_argument('--accumulation_steps', type=int, default=4)
     parser.add_argument('--grad_clip', type=float, default=1.0)
 
+    parser.add_argument('--selection_metric', type=str, default='macro_f1')
+
+    parser.add_argument('--log_train_metrics', action='store_true')
+    
+    parser.add_argument('--use_eval_preprocess_for_train', action=argparse.BooleanOptionalAction, default=True)
+    
     args = parser.parse_args(args=argv)
 
     args.lora_r = args.lora_rank
@@ -182,7 +203,10 @@ def _load_model_and_preprocesses(args):
 
     if args.model_name == 'unimedclip':
         project_root = Path(args.project_root) if args.project_root is not None else None
-        model, preprocess, _ = load_unimedclip(device=args.device, project_root=project_root)
+
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            model, preprocess, _ = load_unimedclip(device=args.device, project_root=project_root)
+
         return model, preprocess, preprocess
 
     raise ValueError(f'unsupported model_name: {args.model_name}')
@@ -192,22 +216,24 @@ def _apply_vision_lora(args, model, show_adapter_log: bool = False):
     def _apply():
         if args.model_name == 'biomedclip_vit_b16':
             patched_model, _ = apply_biomedclip_lora(
-                args=args,
-                model=model,
-                num_layers=args.lora_layers,
-                lora_rank=args.lora_rank,
-                lora_alpha=args.lora_alpha,
-                lora_dropout=args.lora_dropout,
+                args = args,
+                model = model,
+                num_layers = args.lora_layers,
+                lora_rank = args.lora_rank,
+                lora_alpha = args.lora_alpha,
+                lora_dropout = args.lora_dropout,
+                lora_targets = tuple(args.biomed_lora_targets),
             )
             return patched_model
 
         if args.model_name in ('openai_clip_vit_b16', 'unimedclip'):
             patched_model, _ = apply_clip_lora(
-                model=model,
-                lora_r=args.lora_rank,
-                lora_alpha=args.lora_alpha,
-                lora_dropout=args.lora_dropout,
-                num_layers=args.lora_layers,
+                model = model,
+                lora_r = args.lora_rank,
+                lora_alpha = args.lora_alpha,
+                lora_dropout = args.lora_dropout,
+                num_layers = args.lora_layers,
+                enable_lora = tuple(args.clip_lora_targets),
             )
             return patched_model
 
@@ -224,6 +250,10 @@ def prepare_model(args, support_df: pd.DataFrame, logger: logging.Logger | None 
         logger = logging.getLogger('fewshot_lora')
 
     clip_model, preprocess_train, preprocess_val = _load_model_and_preprocesses(args)
+
+    if getattr(args, 'use_eval_preprocess_for_train', False):
+        preprocess_train = preprocess_val
+
     clip_model = _apply_vision_lora(args, clip_model, show_adapter_log=log_model_summary)
     clip_model = clip_model.to(args.device).float()
 
@@ -257,13 +287,25 @@ def prepare_model(args, support_df: pd.DataFrame, logger: logging.Logger | None 
 
     return clip_model, classifier, preprocess_train, preprocess_val, trainable_names
 
-def compute_metrics(labels, preds, probs):
+def compute_metrics(labels, preds, probs, class_names=None):
     out = {
         'accuracy': accuracy_score(labels, preds),
-        'precision': precision_score(labels, preds, average='macro', zero_division='warn'),
-        'recall': recall_score(labels, preds, average='macro', zero_division='warn'),
-        'macro_f1': f1_score(labels, preds, average='macro', zero_division='warn'),
+        'balanced_accuracy': balanced_accuracy_score(labels, preds),
+        'precision_macro': precision_score(labels, preds, average='macro', zero_division=0),
+        'recall_macro': recall_score(labels, preds, average='macro', zero_division=0),
+        'macro_f1': f1_score(labels, preds, average='macro', zero_division=0),
+        'weighted_f1': f1_score(labels, preds, average='weighted', zero_division=0),
     }
+
+    per_class_precision = precision_score(labels, preds, average=None, zero_division=0)
+    per_class_recall = recall_score(labels, preds, average=None, zero_division=0)
+    per_class_f1 = f1_score(labels, preds, average=None, zero_division=0)
+
+    for i in range(probs.shape[1]):
+        name = class_names[i] if class_names is not None else f'class_{i}'
+        out[f'precision_{name}'] = per_class_precision[i]
+        out[f'recall_{name}'] = per_class_recall[i]
+        out[f'f1_{name}'] = per_class_f1[i]
 
     try:
         if probs.shape[1] == 2:
@@ -276,7 +318,7 @@ def compute_metrics(labels, preds, probs):
     return out
 
 @torch.no_grad()
-def evaluate(clip_model, classifier, loader, device: str):
+def evaluate(clip_model, classifier, loader, device: str, class_names=None):
     clip_model.eval()
     classifier.eval()
 
@@ -295,7 +337,7 @@ def evaluate(clip_model, classifier, loader, device: str):
     preds = np.concatenate(preds_all)
     probs = np.concatenate(probs_all)
 
-    metrics = compute_metrics(labels, preds, probs)
+    metrics = compute_metrics(labels, preds, probs, class_names=class_names)
     return metrics, preds, probs
 
 def make_loaders(
@@ -395,15 +437,31 @@ def train_one_kshot(args, train_df, val_df, test_df, class_names, k, seed, suppo
 
     criterion = nn.CrossEntropyLoss()
 
-    params = [p for p in clip_model.parameters() if p.requires_grad] + [p for p in classifier.parameters() if p.requires_grad]
+    lora_params = [p for p in clip_model.parameters() if p.requires_grad]
+    head_params = [p for p in classifier.parameters() if p.requires_grad]
+
+    params = lora_params + head_params
+
     optimizer = torch.optim.AdamW(
-        params,
-        lr=args.lr,
+        [
+            {
+                'params': head_params,
+                'lr': args.head_lr,
+                'weight_decay': args.head_weight_decay,
+            },
+            {
+                'params': lora_params,
+                'lr': args.lora_lr,
+                'weight_decay': args.lora_weight_decay,
+            },
+        ],
         betas=(args.beta1, args.beta2),
-        weight_decay=args.weight_decay,
     )
 
-    total_updates = max(1, int(np.ceil(len(train_loader) / args.accumulation_steps)) * args.epochs)
+    effective_accum = max(1, min(args.accumulation_steps, len(train_loader)))
+    updates_per_epoch = max(1, int(np.ceil(len(train_loader) / effective_accum)))
+    total_updates = max(1, updates_per_epoch * args.epochs)
+
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
         T_max=total_updates,
@@ -435,19 +493,27 @@ def train_one_kshot(args, train_df, val_df, test_df, class_names, k, seed, suppo
             labels = labels.to(args.device, non_blocking=True)
 
             loss = criterion(encode_logits(clip_model, classifier, images), labels)
-            (loss / args.accumulation_steps).backward()
+            (loss / effective_accum).backward()
             loss_sum += float(loss.item())
 
-            do_step = (step + 1) % args.accumulation_steps == 0 or (step + 1) == len(train_loader)
+            do_step = ((step + 1) % effective_accum == 0) or ((step + 1) == len(train_loader))
+
             if do_step:
                 if args.grad_clip and args.grad_clip > 0:
                     torch.nn.utils.clip_grad_norm_(params, args.grad_clip)
+
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
 
         val_metrics, _, _ = evaluate(clip_model, classifier, val_loader, args.device)
-        score = float(val_metrics['macro_f1'])
+
+        train_metrics = None
+
+        if getattr(args, 'log_train_metrics', False):
+            train_metrics, _, _ = evaluate(clip_model, classifier, train_loader, args.device)
+
+        score = float(val_metrics[args.selection_metric])
 
         if score > best_score:
             best_score = score
@@ -458,23 +524,34 @@ def train_one_kshot(args, train_df, val_df, test_df, class_names, k, seed, suppo
         else:
             patience_count += 1
 
-        lr = scheduler.get_last_lr()[0]
+        train_f1_text = ''
+
+        if train_metrics is not None:
+            train_f1_text = f"train_f1={train_metrics['macro_f1']:.4f} "
 
         epoch_msg = (
             f"model={_model_key(args)} k={k} seed={seed} epoch={epoch + 1}/{args.epochs} "
             f"loss={loss_sum / max(len(train_loader), 1):.4f} "
+            f"{train_f1_text}"
             f"val_acc={val_metrics['accuracy']:.4f} "
             f"val_f1={val_metrics['macro_f1']:.4f} "
             f"val_auc={val_metrics['auc']:.4f} "
-            f"lr={lr:.2e}"
+            f"head_lr={optimizer.param_groups[0]['lr']:.2e} "
+            f"lora_lr={optimizer.param_groups[1]['lr']:.2e}"
         )
 
-        progress.set_postfix(
-            loss=f'{loss_sum / max(len(train_loader), 1):.4f}',
-            val_f1=f'{val_metrics["macro_f1"]:.4f}',
-            best=f'{best_score:.4f}',
-            lr=f'{lr:.1e}',
-        )
+        postfix = {
+            'loss': f'{loss_sum / max(len(train_loader), 1):.4f}',
+            'val_f1': f'{val_metrics["macro_f1"]:.4f}',
+            'best': f'{best_score:.4f}',
+            'head_lr': f'{optimizer.param_groups[0]["lr"]:.1e}',
+            'lora_lr': f'{optimizer.param_groups[1]["lr"]:.1e}',
+        }
+
+        if train_metrics is not None:
+            postfix['train_f1'] = f'{train_metrics["macro_f1"]:.4f}'
+
+        progress.set_postfix(**postfix)
 
         if getattr(args, 'log_epochs', False):
             logger.info(epoch_msg)
@@ -482,10 +559,16 @@ def train_one_kshot(args, train_df, val_df, test_df, class_names, k, seed, suppo
         if writer is not None:
             prefix = f'{_model_key(args)}/k{k}/seed{seed}'
             writer.add_scalar(f'{prefix}/train_loss', loss_sum / max(len(train_loader), 1), epoch)
+
+            if train_metrics is not None:
+                writer.add_scalar(f'{prefix}/train_accuracy', train_metrics['accuracy'], epoch)
+                writer.add_scalar(f'{prefix}/train_macro_f1', train_metrics['macro_f1'], epoch)
+
             writer.add_scalar(f'{prefix}/val_accuracy', val_metrics['accuracy'], epoch)
             writer.add_scalar(f'{prefix}/val_macro_f1', val_metrics['macro_f1'], epoch)
             writer.add_scalar(f'{prefix}/val_auc', val_metrics['auc'], epoch)
-            writer.add_scalar(f'{prefix}/lr', lr, epoch)
+            writer.add_scalar(f'{prefix}/head_lr', optimizer.param_groups[0]['lr'], epoch)
+            writer.add_scalar(f'{prefix}/lora_lr', optimizer.param_groups[1]['lr'], epoch)
             writer.flush()
 
         if patience_count >= args.patience:
@@ -516,7 +599,7 @@ def train_one_kshot(args, train_df, val_df, test_df, class_names, k, seed, suppo
         'k': k,
         'seed': seed,
         'n_train_samples': len(support_df),
-        'best_epoch': best_epoch,
+        'best_epoch': int(best_epoch + 1),
         'best_val_macro_f1': best_score,
         'test_accuracy': test_metrics['accuracy'],
         'test_macro_f1': test_metrics['macro_f1'],
@@ -527,6 +610,13 @@ def train_one_kshot(args, train_df, val_df, test_df, class_names, k, seed, suppo
         'lora_alpha': int(args.lora_alpha),
         'lora_dropout': float(args.lora_dropout),
         'lora_layers': None if args.lora_layers is None else int(args.lora_layers),
+        'clip_lora_targets': list(getattr(args, 'clip_lora_targets', [])),
+        'biomed_lora_targets': list(getattr(args, 'biomed_lora_targets', [])),
+        'head_lr': float(args.head_lr),
+        'lora_lr': float(args.lora_lr),
+        'lr_min': float(args.lr_min),
+        'accumulation_steps': int(args.accumulation_steps),
+        'use_eval_preprocess_for_train': bool(args.use_eval_preprocess_for_train)
     }
 
     if save_dir is not None:
@@ -606,6 +696,9 @@ def run_kshot_experiments(args, train_df, val_df, test_df, class_names, ks, seed
     summary_df = (
         results_df.groupby('k', as_index=False)
         .agg(
+            best_epoch_mean=('best_epoch', 'mean'),
+            best_val_macro_f1_mean=('best_val_macro_f1', 'mean'),
+            best_val_macro_f1_std=('best_val_macro_f1', 'std'),
             test_accuracy_mean=('test_accuracy', 'mean'),
             test_accuracy_std=('test_accuracy', 'std'),
             test_macro_f1_mean=('test_macro_f1', 'mean'),

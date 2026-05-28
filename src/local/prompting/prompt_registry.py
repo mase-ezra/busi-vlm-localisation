@@ -1,34 +1,34 @@
 PROMPT_REGISTRY = {
     'benign tumor': [
-        'a breast ultrasound image showing an oval mass with circumscribed margins, consistent with a benign tumor.',
-        'a breast ultrasound image showing a parallel wider-than-tall lesion, consistent with a benign tumor.',
-        'a breast ultrasound image showing a smooth well-defined benign breast mass.',
-        'a grayscale breast ultrasound image showing an oval circumscribed benign lesion.',
-        'a breast ultrasound image showing a benign mass with gentle lobulations and well-defined borders.',
-        'a breast ultrasound image showing a homogeneous benign-appearing breast lesion.',
-        'a breast ultrasound image showing an isoechoic or mildly hypoechoic circumscribed benign mass.',
-        'a breast ultrasound image showing an oval, parallel, circumscribed breast mass.'
+        'a breast ultrasound image of a benign breast tumor.',
+        'a grayscale breast ultrasound image showing a benign breast mass.',
+        'a breast ultrasound image showing an oval circumscribed benign mass.',
+        'a breast ultrasound image showing a smooth well-defined benign mass.',
+        'a breast ultrasound image showing a parallel circumscribed benign lesion.',
+        'a breast ultrasound image showing an oval mass with circumscribed margin and parallel orientation, indicating a benign breast tumor.',
+        'a breast ultrasound image showing a homogeneous circumscribed hypoechoic mass, suggesting a benign breast tumor.',
+        'a breast ultrasound image showing a well-defined smooth mass with no posterior shadowing, characteristic of a benign breast tumor.'
     ],
 
     'malignant tumor': [
-        'a breast ultrasound image showing an irregular mass with spiculated margins, consistent with a malignant tumor.',
-        'a breast ultrasound image showing a taller-than-wide lesion, suspicious for a malignant tumor.',
-        'a breast ultrasound image showing a non-parallel irregular breast mass.',
-        'a grayscale breast ultrasound image showing an irregular hypoechoic malignant lesion.',
-        'a breast ultrasound image showing angular or indistinct margins, suspicious for malignancy.',
-        'a breast ultrasound image showing microlobulated suspicious margins and malignant morphology.',
-        'a breast ultrasound image showing posterior acoustic shadowing, suspicious for a malignant lesion.',
-        'a breast ultrasound image showing a heterogeneous irregular breast mass, consistent with malignancy.'
+        'a breast ultrasound image of a malignant breast tumor.',
+        'a grayscale breast ultrasound image showing a malignant breast mass.',
+        'a breast ultrasound image showing an irregular malignant mass.',
+        'a breast ultrasound image showing a suspicious malignant breast lesion.',
+        'a breast ultrasound image showing a non-parallel irregular malignant mass.',
+        'a breast ultrasound image showing an irregular hypoechoic mass with not parallel orientation, indicating a malignant breast tumor.',
+        'a breast ultrasound image showing a malignant mass with indistinct, angular, or microlobulated margins.',
+        'a breast ultrasound image showing an irregular mass with spiculated margin and posterior acoustic shadowing, suggesting a malignant breast tumor.'
     ],
 
     'normal scan': [
-        'a normal breast ultrasound image with no focal lesion.',
-        'a breast ultrasound image showing no mass and no suspicious lesion.',
-        'a normal breast ultrasound scan with normal tissue echotexture.',
-        'a grayscale breast ultrasound image showing no focal breast tumor.',
-        'a breast ultrasound image showing normal breast tissue without a suspicious mass.',
-        'a breast ultrasound image showing no solid or cystic lesion.',
-        'a normal breast ultrasound image with no architectural distortion or focal abnormality.',
-        'a breast ultrasound image showing regular tissue planes and no visible lesion.'
+        'a normal breast ultrasound image.',
+        'a grayscale breast ultrasound image showing normal breast tissue.',
+        'a breast ultrasound image showing no mass.',
+        'a breast ultrasound image showing no focal lesion.',
+        'a breast ultrasound image showing no suspicious abnormality.',
+        'an ultrasound image showing homogeneous echotexture throughout, indicating a normal breast ultrasound scan.',
+        'a grayscale breast ultrasound image showing well-defined ducts and lobules, characteristic of a normal breast ultrasound scan.',
+        'a breast ultrasound image showing normal tissue planes with no visible tumor.'
     ]
 }

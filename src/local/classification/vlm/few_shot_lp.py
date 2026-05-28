@@ -1,5 +1,6 @@
 '''
 Few-shot linear probe training for CLIP variants. We train a linear classifier on top of frozen CLIP image encoders with varying amounts of training data to evaluate data efficiency.
+See: https://github.com/FereshteShakeri/FewShot-CLIP-Strong-Baseline
 See: https://github.com/batmanlab/Mammo-CLIP/
 See: https://github.com/jinggqu/NextGen-UIA/
 '''
@@ -488,7 +489,7 @@ def run_linear_probe_experiments(
             test_macro_f1_mean=('test_macro_f1', 'mean'),
             test_macro_f1_std=('test_macro_f1', 'std'),
             test_auc_mean=('test_auc', 'mean'),
-            test_auc_std=('test_auc', 'std'),
+            test_auc_std=('test_auc', 'std')
         )
     )
 

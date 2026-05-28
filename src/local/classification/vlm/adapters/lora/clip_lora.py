@@ -31,7 +31,7 @@ class LinearLoRA(nn.Module):
 
         self.base = base_linear
         self.r = int(r)
-        self.scaling = lora_alpha / math.sqrt(self.r) if self.r > 0 else 1.0
+        self.scaling = lora_alpha / self.r if self.r > 0 else 1.0
         self.dropout = nn.Dropout(dropout_rate) if dropout_rate > 0 else nn.Identity()
 
         for p in self.base.parameters():
@@ -164,20 +164,24 @@ class PlainMultiheadAttentionLoRA(nn.Module):
         return attn_output, None
 
 
-# Apply LoRA to OpenAI CLIP / UniMedCLIP vision encoder.
-def apply_lora(model, lora_r=16, lora_alpha=32, lora_dropout=0.1, num_layers=None):
+# Apply LoRA to OpenAI CLIP and UniMedCLIP vision encoder.
+# For a fair comparison with BiomedCLIP, which adapts fused qkv and proj layers, this adapter enables LoRA on q, k, v, and output projection layers.
+def apply_lora(model, lora_r=16, lora_alpha=32, lora_dropout=0.1, num_layers=None, enable_lora=('q', 'k', 'v', 'o')):
     freeze_model(model)
 
     lora_count = 0
-    enable_lora = ('q', 'k', 'v', 'o')
+
+    if isinstance(enable_lora, str):
+        enable_lora = tuple(enable_lora)
 
     if not (hasattr(model, 'visual') and hasattr(model.visual, 'transformer') and hasattr(model.visual.transformer, 'resblocks')):
         raise ValueError('expected model.visual.transformer.resblocks for clip-style vision lora.')
 
     blocks = model.visual.transformer.resblocks
     layers_to_inject = len(blocks) if num_layers is None else min(num_layers, len(blocks))
+    start_idx = len(blocks) - layers_to_inject
 
-    for i in range(layers_to_inject):
+    for i in range(start_idx, len(blocks)):
         block = blocks[i]
 
         if not hasattr(block, 'attn'):
