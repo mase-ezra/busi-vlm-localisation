@@ -4,7 +4,6 @@
 
 /dataset/
 /models/
-/results/
 /runs/
 
 *.pth
