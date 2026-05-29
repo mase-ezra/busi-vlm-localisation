@@ -163,7 +163,6 @@ class PlainMultiheadAttentionLoRA(nn.Module):
 
         return attn_output, None
 
-
 # Apply LoRA to OpenAI CLIP and UniMedCLIP vision encoder.
 # For a fair comparison with BiomedCLIP, which adapts fused qkv and proj layers, this adapter enables LoRA on q, k, v, and output projection layers.
 def apply_lora(model, lora_r=16, lora_alpha=32, lora_dropout=0.1, num_layers=None, enable_lora=('q', 'k', 'v', 'o')):

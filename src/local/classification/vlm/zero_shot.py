@@ -1,8 +1,11 @@
 '''
 Zero-shot CLIP classification helpers for all three CLIP variants using prompt ensembling.
+
+See: https://github.com/mlfoundations/open_clip/blob/main/src/open_clip/zero_shot_classifier.py
 '''
 
 import torch
+import torch.nn.functional as F
 import numpy as np
 from sklearn.metrics import (accuracy_score, balanced_accuracy_score, f1_score, precision_score, recall_score, roc_auc_score)
 
@@ -14,62 +17,63 @@ def move_tokenized_to_device(tokenized, device):
     return tokenized
 
 # Build text embeddings for each class.
-def build_text_embeddings(model, tokenizer, prompt_registry, class_names, device='cuda'):
-    text_embeddings = {}
+def build_text_embeddings(model, tokenizer, prompt_registry, class_names, device='cuda', tokenizer_kwargs=None):
+    tokenizer_kwargs = tokenizer_kwargs or {}
+    zeroshot_weights = []
 
     for class_name in class_names:
         prompts = prompt_registry[class_name]
 
-        # Tokenize all prompts for this class.
-        tokenized = tokenizer(prompts)
+        tokenized = tokenizer(prompts, **tokenizer_kwargs)
         tokenized = move_tokenized_to_device(tokenized, device)
 
-        # Encode and normalize each prompt.
         with torch.no_grad():
             text_features = model.encode_text(tokenized)
-            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
-        # Store all prompt-level embeddings for this class.
-        text_embeddings[class_name] = text_features
+            # Normalise each prompt embedding.
+            text_features = F.normalize(text_features, dim=-1)
 
-    return text_embeddings
+            # Average the eight prompts into one class prototype.
+            class_embedding = text_features.mean(dim=0)
+
+            # Normalise after averaging.
+            class_embedding = F.normalize(class_embedding, dim=0)
+
+        zeroshot_weights.append(class_embedding)
+
+    zeroshot_weights = torch.stack(zeroshot_weights, dim=1).to(device)
+
+    return zeroshot_weights
 
 # Compute zero-shot predictions using prompt ensemble averaging.
-def predict_from_image_features(image_features, text_embeddings, class_names, temperature=100.0):
-    logits_by_class = []
+def predict_from_image_features(image_features, text_embeddings, model):
+    # Ensure image features are normalised.
+    image_features = F.normalize(image_features, dim=-1)
 
-    for class_name in class_names:
-        class_text_embeddings = text_embeddings[class_name]
+    # Cosine similarity scores for image-to-class matching.
+    similarity_scores = image_features @ text_embeddings
 
-        # Compute similarity with each prompt for this class: [B, D] @ [D, P] = [B, P].
-        prompt_logits = temperature * (image_features @ class_text_embeddings.T)
+    # Scale similarities using CLIP's learned scale and choose the best match.
+    logit_scale = model.logit_scale.exp()
+    logits = logit_scale * similarity_scores
 
-        # Average prompt-level logits for this class.
-        class_logits = prompt_logits.mean(dim=1)
+    probabilities = torch.softmax(logits, dim = 1)
+    predictions = logits.argmax(dim = 1)
 
-        logits_by_class.append(class_logits)
-
-    # Stack class logits: [B, C].
-    logits = torch.stack(logits_by_class, dim=1)
-
-    # Convert to probabilities.
-    probs = torch.softmax(logits, dim=1)
-
-    # Get predictions.
-    preds = logits.argmax(dim=1)
-
-    return preds.cpu().numpy(), probs.cpu().numpy()
+    return (predictions.detach().cpu().numpy(), probabilities.detach().cpu().numpy())
 
 # End-to-end zero-shot prediction from images.
-def zero_shot_predict(model, images, text_embeddings, class_names, device='cuda', temperature=100.0):
+def zero_shot_predict(model, images, text_embeddings, device = 'cuda'):
     images = images.to(device)
 
     with torch.no_grad():
         # Encode and normalize images.
         image_features = model.encode_image(images)
-        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+        image_features = F.normalize(image_features, dim = -1)
 
-    return predict_from_image_features(image_features, text_embeddings, class_names, temperature)
+        predictions, probabilities = predict_from_image_features(image_features, text_embeddings, model)
+
+    return predictions, probabilities
 
 # Compute comprehensive classification metrics.
 def compute_classification_metrics(true_labels, predictions, probabilities, class_names):
@@ -105,87 +109,63 @@ def compute_classification_metrics(true_labels, predictions, probabilities, clas
 
 # Class for zero-shot CLIP evaluation.
 class ZeroShotEvaluator:
-    def __init__(self, model, preprocess, tokenizer, prompt_registry, class_names, device='cuda'):
-        self.model = model
+    def __init__(self, model, preprocess, tokenizer, prompt_registry, class_names, device='cuda', tokenizer_kwargs = None):
+        self.model = model.to(device)
+        self.model.eval()
+
         self.preprocess = preprocess
         self.tokenizer = tokenizer
         self.prompt_registry = prompt_registry
         self.class_names = class_names
         self.device = device
+        self.tokenizer_kwargs = tokenizer_kwargs or {}
         self.text_embeddings = None
         
+    # Build text embeddings from prompt registry.
     def build_text_embeddings(self, verbose=True):
-        '''Build text embeddings from prompt registry.'''
-        self.text_embeddings = build_text_embeddings(
-            self.model,
-            self.tokenizer,
-            self.prompt_registry,
-            self.class_names,
-            device=self.device
-        )
-        
+        self.text_embeddings = build_text_embeddings(self.model, self.tokenizer, self.prompt_registry, self.class_names, device=self.device, tokenizer_kwargs=self.tokenizer_kwargs)
+
         if verbose:
-            for class_name in self.class_names:
-                shape = self.text_embeddings[class_name].shape
-                print(f'{class_name} - {shape}')
-        
+            print(f'class text prototypes - {self.text_embeddings.shape}')
+
         return self.text_embeddings
     
+    # Encode images from the dataframe.
     def encode_images(self, dataframe, batch_size=32, description='encoding images'):
-        '''Encode images from dataframe.'''
         from .helpers import encode_images_batch
         
-        image_features = encode_images_batch(
-            self.model,
-            self.preprocess,
-            dataframe,
-            device=self.device,
-            batch_size=batch_size,
-            description=description
-        )
+        image_features = encode_images_batch(self.model, self.preprocess, dataframe, device=self.device, batch_size=batch_size, description=description)
         return image_features
     
-    def evaluate(self, dataframe, batch_size=32, temperature=100.0, description='encoding images'):
-        '''Run full evaluation pipeline: encode images, predict, compute metrics.'''
-        # Ensure text embeddings are built.
+    # Run full evaluation pipeline: encode images, predict, compute metrics.
+    def evaluate(self, dataframe, batch_size=32, description='encoding images'):
         if self.text_embeddings is None:
             self.build_text_embeddings(verbose=False)
-        
-        # Encode images.
-        image_features = self.encode_images(dataframe, batch_size, description)
-        
-        # Get true labels.
+
+        image_features = self.encode_images(dataframe, batch_size=batch_size, description=description)
+
         true_labels = dataframe['label_index'].values
-        
-        # Predict.
-        predictions, probabilities = predict_from_image_features(
-            image_features.to(self.device),
-            self.text_embeddings,
-            self.class_names,
-            temperature=temperature
-        )
-        
-        # Compute metrics.
+
+        predictions, probabilities = predict_from_image_features(image_features.to(self.device), self.text_embeddings, self.model)
+
         base_class_names = []
+
         for name in self.class_names:
             if ' tumor' in name:
                 base_class_names.append(name.replace(' tumor', ''))
+
             elif ' scan' in name:
                 base_class_names.append(name.replace(' scan', ''))
+
             else:
                 base_class_names.append(name)
-        
-        metrics = compute_classification_metrics(
-            true_labels,
-            predictions,
-            probabilities,
-            base_class_names
-        )
-        
+
+        metrics = compute_classification_metrics(true_labels, predictions, probabilities, base_class_names)
+
         return metrics, predictions, probabilities
     
+    # Show the zero-shot evaluation results.
     def print_results(self, metrics, model_name='CLIP'):
-        '''Print evaluation results in a clean format.'''
         print(f'\nZero-Shot Results: {model_name}')
         print(f"accuracy - {metrics['accuracy']:.4f}")
         print(f"balanced Accuracy - {metrics['balanced_accuracy']:.4f}")
