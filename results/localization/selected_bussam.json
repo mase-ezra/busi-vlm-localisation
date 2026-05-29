@@ -1,0 +1,16 @@
+{
+  "checkpoint": "C:/Users/User/busi-vlm-localisation/external/BUSSAM/outputs/BUSSAM_0529235103/checkpoints/BUSSAM_100.pth",
+  "device": "cuda",
+  "epochs": 100,
+  "batch_size": 8,
+  "base_lr": 0.0005,
+  "dataset_counts": {
+    "train": 371,
+    "val": 79,
+    "test": 80
+  },
+  "selection_rule": "highest validation Dice checkpoint filename",
+  "history_csv": "c:/Users/User/busi-vlm-localisation/results/localization/bussam_training_history.csv",
+  "test_results": "C:/Users/User/busi-vlm-localisation/external/BUSSAM/outputs/test_results.txt",
+  "prediction_dir": "C:/Users/User/busi-vlm-localisation/external/BUSSAM/outputs/PT10-BUSSAM"
+}

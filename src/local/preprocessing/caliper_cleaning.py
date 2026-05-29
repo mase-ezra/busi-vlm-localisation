@@ -419,23 +419,29 @@ def expand_caliper_boxes(caliper_boxes, img_h, img_w,
 
 def find_text_regions_easyocr(img_bgr, reader):
     boxes = []
+
     for bbox, text, conf in reader.readtext(img_bgr):
         text_clean = text.strip().lower()
+
         if text_clean in OCR_IGNORE_STRINGS:
             continue
+
         if conf < OCR_CONF:
             continue
-        print(f'  OCR: "{text_clean}" conf={conf:.2f}')
+
         xs = [p[0] for p in bbox]
         ys = [p[1] for p in bbox]
+
         x1 = max(0, int(min(xs)) - OCR_PADDING)
         y1 = max(0, int(min(ys)) - OCR_PADDING)
         x2 = min(img_bgr.shape[1], int(max(xs)) + OCR_PADDING)
         y2 = min(img_bgr.shape[0], int(max(ys)) + OCR_PADDING)
-        if TEXT_BOX_MAX_AREA > 0 and (x2-x1)*(y2-y1) > TEXT_BOX_MAX_AREA:
-            print(f'    skipped (area={(x2-x1)*(y2-y1)} > {TEXT_BOX_MAX_AREA})')
+
+        if TEXT_BOX_MAX_AREA > 0 and (x2 - x1) * (y2 - y1) > TEXT_BOX_MAX_AREA:
             continue
+
         boxes.append((x1, y1, x2, y2))
+
     return boxes
 
 # Build pixel-exact removal mask.
@@ -498,42 +504,37 @@ def inpaint_masked(img_bgr, mask, radius=INPAINT_RADIUS):
     return cv2.inpaint(img_bgr, mask, radius, cv2.INPAINT_TELEA)
 
 def sus_img(gray, img_bgr, caliper_boxes_raw, dotted_lines):
-    print(f'  fallback: {len(caliper_boxes_raw)} calipers, '
-          f'{len(dotted_lines)} lines')
-
     img_h, img_w = gray.shape
 
     # Add template-matched calipers if we are short.
     if len(caliper_boxes_raw) < MIN_CALIPERS_BEFORE_TEMPLATE:
         tm_boxes = find_caliper_markers_template(gray)
-        cc_centres = [((x1+x2)//2, (y1+y2)//2) for x1, y1, x2, y2 in caliper_boxes_raw]
+
+        cc_centres = [((x1 + x2) // 2, (y1 + y2) // 2) for x1, y1, x2, y2 in caliper_boxes_raw]
+
         for tb in tm_boxes:
-            tcx, tcy = (tb[0]+tb[2])//2, (tb[1]+tb[3])//2
-            if not any(abs(tcx-ccx) <= CC_TEMPLATE_DEDUP_RADIUS and
-                       abs(tcy-ccy) <= CC_TEMPLATE_DEDUP_RADIUS
-                       for ccx, ccy in cc_centres):
+            tcx = (tb[0] + tb[2]) // 2
+            tcy = (tb[1] + tb[3]) // 2
+
+            if not any(abs(tcx - ccx) <= CC_TEMPLATE_DEDUP_RADIUS and abs(tcy - ccy) <= CC_TEMPLATE_DEDUP_RADIUS for ccx, ccy in cc_centres):
                 caliper_boxes_raw.append(tb)
+
         caliper_boxes_raw = merge_overlapping_boxes(caliper_boxes_raw, dilate=4)
-        print(f'    after template matching: {len(caliper_boxes_raw)} calipers')
 
     # Compute both colour ranges.
     colour_lo_raw, colour_hi_raw = sample_annotation_colours(gray, caliper_boxes_raw)
+
     colour_lo, colour_hi = clamp_mask_coverage(gray, colour_lo_raw, colour_hi_raw)
 
-    # Re-score dotted lines with clamped range (tighter = fewer false positives).
-    dotted_lines, paired_indices = find_dotted_lines(
-        gray, caliper_boxes_raw, colour_lo, colour_hi, (img_h, img_w)
-    )
+    # Re-score dotted lines with clamped range.
+    dotted_lines, paired_indices = find_dotted_lines(gray, caliper_boxes_raw, colour_lo, colour_hi, (img_h, img_w))
 
     # Radial trace using the raw range so dim dots are not missed.
-    traced_lines = find_traced_lines(
-        gray, caliper_boxes_raw, paired_indices,
-        colour_lo_raw, colour_hi_raw, (img_h, img_w)
-    )
+    traced_lines = find_traced_lines(gray, caliper_boxes_raw, paired_indices, colour_lo_raw, colour_hi_raw, (img_h, img_w))
 
     all_lines = dotted_lines + traced_lines
-    print(f'    dotted={len(dotted_lines)}, traced={len(traced_lines)}')
-    return caliper_boxes_raw, all_lines, colour_lo, colour_hi, colour_lo_raw, colour_hi_raw
+
+    return (caliper_boxes_raw, all_lines, colour_lo, colour_hi, colour_lo_raw, colour_hi_raw)
 
 def preprocess_image(img_bgr):
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
@@ -609,6 +610,8 @@ def preprocess_image(img_bgr):
         'grey_mask': grey_mask,
         'colour_mask': colour_mask,
         'text_mask': text_mask,
+        'ocr_regions': len(text_boxes),
+        'used_fallback': need_fallback
     }
 
     return cleaned, debug_info
