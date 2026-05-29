@@ -1,5 +1,6 @@
 import torch
 import open_clip
+
 '''
 We chose Microsoft’s BiomedCLIP as a biomedical VLM because it was pretrained on PMC-15M (a dataset with over 15 million biomedical image-text pairs collected from PubMed articles).
 See: https://github.com/microsoft/BiomedCLIP_data_pipeline
