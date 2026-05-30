@@ -31,7 +31,7 @@ def encode_images_batch(model, preprocess, dataframe, device='cuda', batch_size=
             
             # Encode images.
             features = model.encode_image(images)
-            features = features / features.norm(dim=-1, keepdim=True)
+            features = features / features.norm(dim=-1, keepdim=True).clamp_min(1e-6)
             
             all_features.append(features.cpu())
     

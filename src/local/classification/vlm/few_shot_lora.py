@@ -205,7 +205,7 @@ def _load_model_and_preprocesses(args):
         project_root = Path(args.project_root) if args.project_root is not None else None
 
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            model, preprocess, _ = load_unimedclip(device=args.device, project_root=project_root)
+            model, preprocess, _ = load_unimedclip(device=args.device, project_root=project_root, quiet=True)
 
         return model, preprocess, preprocess
 
@@ -288,18 +288,19 @@ def prepare_model(args, support_df: pd.DataFrame, logger: logging.Logger | None 
     return clip_model, classifier, preprocess_train, preprocess_val, trainable_names
 
 def compute_metrics(labels, preds, probs, class_names=None):
+    metric_labels = np.arange(probs.shape[1])
     out = {
         'accuracy': accuracy_score(labels, preds),
         'balanced_accuracy': balanced_accuracy_score(labels, preds),
-        'precision_macro': precision_score(labels, preds, average='macro', zero_division=0),
-        'recall_macro': recall_score(labels, preds, average='macro', zero_division=0),
-        'macro_f1': f1_score(labels, preds, average='macro', zero_division=0),
-        'weighted_f1': f1_score(labels, preds, average='weighted', zero_division=0),
+        'precision_macro': precision_score(labels, preds, labels=metric_labels, average='macro', zero_division=0),
+        'recall_macro': recall_score(labels, preds, labels=metric_labels, average='macro', zero_division=0),
+        'macro_f1': f1_score(labels, preds, labels=metric_labels, average='macro', zero_division=0),
+        'weighted_f1': f1_score(labels, preds, labels=metric_labels, average='weighted', zero_division=0)
     }
 
-    per_class_precision = precision_score(labels, preds, average=None, zero_division=0)
-    per_class_recall = recall_score(labels, preds, average=None, zero_division=0)
-    per_class_f1 = f1_score(labels, preds, average=None, zero_division=0)
+    per_class_precision = precision_score(labels, preds, labels=metric_labels, average=None, zero_division=0)
+    per_class_recall = recall_score(labels, preds, labels=metric_labels, average=None, zero_division=0)
+    per_class_f1 = f1_score(labels, preds, labels=metric_labels, average=None, zero_division=0)
 
     for i in range(probs.shape[1]):
         name = class_names[i] if class_names is not None else f'class_{i}'
@@ -309,9 +310,10 @@ def compute_metrics(labels, preds, probs, class_names=None):
 
     try:
         if probs.shape[1] == 2:
-            out['auc'] = roc_auc_score(labels, probs[:, 1])
+            out['auc'] = roc_auc_score(labels, probs[:, 1], labels=metric_labels)
         else:
-            out['auc'] = roc_auc_score(labels, probs, multi_class='ovr', average='macro')
+            out['auc'] = roc_auc_score(labels, probs, labels=metric_labels, multi_class='ovr', average='macro')
+    
     except ValueError:
         out['auc'] = np.nan
 
@@ -587,7 +589,6 @@ def train_one_kshot(args, train_df, val_df, test_df, class_names, k, seed, suppo
         f"test_f1={test_metrics['macro_f1']:.4f} "
         f"test_auc={test_metrics['auc']:.4f}"
     )
-    print(done_msg)
     logger.info(done_msg)
 
     clip_trainable, clip_total = count_trainable_parameters(clip_model)
@@ -667,6 +668,7 @@ def run_kshot_experiments(args, train_df, val_df, test_df, class_names, ks, seed
     )
 
     for k in ks:
+        k_results = []
         for seed in seeds:
             support_idx = None
             if support_indices is not None:
@@ -691,6 +693,17 @@ def run_kshot_experiments(args, train_df, val_df, test_df, class_names, ks, seed
                 log_model_summary=is_first_run,
             )
             results.append(result)
+            k_results.append(result)
+
+        k_df = pd.DataFrame(k_results)
+        k_msg = (
+            f"model={model_key} k={k} | seeds={len(k_results)} "
+            f"| acc={k_df['test_accuracy'].mean():.4f}+/-{k_df['test_accuracy'].std():.4f} "
+            f"| f1={k_df['test_macro_f1'].mean():.4f}+/-{k_df['test_macro_f1'].std():.4f} "
+            f"| auc={k_df['test_auc'].mean():.4f}+/-{k_df['test_auc'].std():.4f}"
+        )
+        print(k_msg)
+        logger.info(k_msg)
 
     results_df = pd.DataFrame(results)
     summary_df = (

@@ -181,7 +181,7 @@ def compute_metrics(y_true, y_pred, probs, class_names):
             y_true,
             probs,
             multi_class='ovr',
-            average='macro',
+            average='macro'
         )
     except ValueError:
         metrics['auc'] = np.nan
@@ -193,7 +193,7 @@ def compute_metrics(y_true, y_pred, probs, class_names):
         y_pred,
         labels=labels,
         average=None,
-        zero_division=0,
+        zero_division=0
     )
 
     per_class_recall = recall_score(
@@ -201,7 +201,7 @@ def compute_metrics(y_true, y_pred, probs, class_names):
         y_pred,
         labels=labels,
         average=None,
-        zero_division=0,
+        zero_division=0
     )
 
     per_class_f1 = f1_score(
@@ -209,7 +209,7 @@ def compute_metrics(y_true, y_pred, probs, class_names):
         y_pred,
         labels=labels,
         average=None,
-        zero_division=0,
+        zero_division=0
     )
 
     for i, class_name in enumerate(class_names):
@@ -232,7 +232,7 @@ def predict_linear_probe(model, features, labels, class_names, device='cuda', ba
         y_true=y,
         y_pred=preds,
         probs=probs,
-        class_names=class_names,
+        class_names=class_names
     )
 
     return metrics, preds, probs
@@ -245,7 +245,7 @@ def train_linear_probe(
     class_names,
     device='cuda',
     config=None,
-    verbose=False,
+    verbose=False
 ):
     '''Train logistic regression on frozen image features and select C on validation.'''
     if config is None:
@@ -373,24 +373,8 @@ def run_linear_probe_once(model_name, train_features, train_labels, val_features
 
     return test_metrics
 
-def run_linear_probe_experiments(
-    model_name,
-    train_features,
-    train_labels,
-    val_features,
-    val_labels,
-    test_features,
-    test_labels,
-    class_names,
-    ratios,
-    seeds,
-    device='cuda',
-    config=None,
-    log_dir=None,
-    verbose=False,
-    kshot_indices=None,
-):
-    '''Run linear-probe experiments across train ratios and seeds.'''
+# Run the linear-probe experiments for all k-shots and seeds.
+def run_linear_probe_experiments(model_name, train_features, train_labels, val_features, val_labels, test_features, test_labels, class_names, ratios, seeds, device='cuda', config=None, log_dir=None, verbose=False, kshot_indices=None):
     if config is None:
         config = LinearProbeConfig()
 
@@ -408,38 +392,23 @@ def run_linear_probe_experiments(
     all_results = []
 
     for ratio in ratios:
+        ratio_results = []
+
         for seed in seeds:
             support_indices = None
+
             if kshot_indices is not None:
                 support_indices = kshot_indices.get(int(ratio), {}).get(int(seed))
+
                 if support_indices is None:
-                    raise ValueError(
-                        f'no support indices found for ratio={ratio} seed={seed}'
-                    )
-
-            metrics = run_linear_probe_once(
-                model_name=model_name,
-                train_features=train_features,
-                train_labels=train_labels,
-                val_features=val_features,
-                val_labels=val_labels,
-                test_features=test_features,
-                test_labels=test_labels,
-                class_names=class_names,
-                ratio=ratio,
-                seed=seed,
-                device=device,
-                config=config,
-                log_dir=log_dir,
-                verbose=verbose,
-                support_indices=support_indices,
-            )
-
+                    raise ValueError(f'no support indices found for ratio={ratio} seed={seed}')
+                
+            metrics = run_linear_probe_once(model_name=model_name, train_features=train_features, train_labels=train_labels, val_features=val_features, val_labels=val_labels, test_features=test_features, test_labels=test_labels, class_names=class_names, ratio=ratio, seed=seed, device=device, config=config, log_dir=log_dir, verbose=verbose, support_indices=support_indices)
             all_results.append(metrics)
-
+            ratio_results.append(metrics)
             is_shots = is_shots_per_class(ratio)
             label = f'shots={int(ratio)}' if is_shots else f'ratio={ratio:.2f}'
-
+            
             message = (
                 f"model={model_name} {label} seed={seed} "
                 f"| n={metrics['n_train_samples']} "
@@ -449,21 +418,34 @@ def run_linear_probe_experiments(
                 f"| test_f1={metrics['test_macro_f1']:.4f} "
                 f"| test_auc={metrics['test_auc']:.4f}"
             )
-            print(message)
+
+            if verbose:
+                print(message)
+
             if logger is not None:
                 logger.info(message)
+
+        # I've just made the k-shot logging clearer.
+        ratio_df = pd.DataFrame(ratio_results)
+        is_shots = is_shots_per_class(ratio)
+        label = f'k={int(ratio)}' if is_shots else f'ratio={ratio:.2f}'
+
+        summary_message = (
+            f"model={model_name} {label} | seeds={len(ratio_results)} "
+            f"| acc={ratio_df['test_accuracy'].mean():.4f}+/-{ratio_df['test_accuracy'].std():.4f} "
+            f"| f1={ratio_df['test_macro_f1'].mean():.4f}+/-{ratio_df['test_macro_f1'].std():.4f} "
+            f"| auc={ratio_df['test_auc'].mean():.4f}+/-{ratio_df['test_auc'].std():.4f}"
+        )
+
+        print(summary_message)
+
+        if logger is not None:
+            logger.info(summary_message)
 
     results_df = pd.DataFrame(all_results)
     results_df['k'] = results_df['shots_per_class']
 
-    agg_metrics = [
-        'accuracy',
-        'balanced_accuracy',
-        'macro_f1',
-        'weighted_f1',
-        'auc',
-        'n_train_samples',
-    ]
+    agg_metrics = ['accuracy', 'balanced_accuracy', 'macro_f1', 'weighted_f1', 'auc', 'n_train_samples']
 
     agg_dict = {f'{m}_mean': (m, 'mean') for m in agg_metrics}
     agg_dict.update({f'{m}_std': (m, 'std') for m in agg_metrics})
@@ -483,14 +465,7 @@ def run_linear_probe_experiments(
     summary_df = (
         results_df
         .groupby('k', as_index=False)
-        .agg(
-            test_accuracy_mean=('test_accuracy', 'mean'),
-            test_accuracy_std=('test_accuracy', 'std'),
-            test_macro_f1_mean=('test_macro_f1', 'mean'),
-            test_macro_f1_std=('test_macro_f1', 'std'),
-            test_auc_mean=('test_auc', 'mean'),
-            test_auc_std=('test_auc', 'std')
-        )
+        .agg(test_accuracy_mean=('test_accuracy', 'mean'), test_accuracy_std=('test_accuracy', 'std'), test_macro_f1_mean=('test_macro_f1', 'mean'), test_macro_f1_std=('test_macro_f1', 'std'), test_auc_mean=('test_auc', 'mean'), test_auc_std=('test_auc', 'std'))
     )
 
     if logger is not None and output_dir is not None:

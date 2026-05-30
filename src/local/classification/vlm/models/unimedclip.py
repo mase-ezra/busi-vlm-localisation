@@ -1,4 +1,6 @@
 import sys
+import contextlib
+import io
 from pathlib import Path
 import torch
 from huggingface_hub import hf_hub_download
@@ -90,21 +92,42 @@ def _create_unimed_model_with_torch_load_patch(unimed_open_clip, model_name, che
 
     return model, preprocess
 
-def load_unimedclip(device='cuda', project_root=None):
+@contextlib.contextmanager
+def _quiet_unimed_load(enabled=True):
+    if not enabled:
+        yield
+        return
+
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        try:
+            from transformers.utils import logging as transformers_logging
+            previous_verbosity = transformers_logging.get_verbosity()
+            transformers_logging.set_verbosity_error()
+        except Exception:
+            transformers_logging = None
+            previous_verbosity = None
+
+        try:
+            yield
+        finally:
+            if transformers_logging is not None:
+                transformers_logging.set_verbosity(previous_verbosity)
+
+def load_unimedclip(device='cuda', project_root=None, quiet=True):
     project_root = _resolve_unimed_project_root(project_root)
-    unimed_open_clip = _load_unimed_open_clip(project_root)
 
-    checkpoint_path = _resolve_unimed_checkpoint(project_root)
+    with _quiet_unimed_load(quiet):
+        unimed_open_clip = _load_unimed_open_clip(project_root)
+        checkpoint_path = _resolve_unimed_checkpoint(project_root)
 
-    model_name = 'ViT-B-16-quickgelu'
-    text_encoder_name = 'microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract'
+        model_name = 'ViT-B-16-quickgelu'
+        text_encoder_name = 'microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract'
 
-    mean = (0.48145466, 0.4578275, 0.40821073)
-    std = (0.26862954, 0.26130258, 0.27577711)
+        mean = (0.48145466, 0.4578275, 0.40821073)
+        std = (0.26862954, 0.26130258, 0.27577711)
 
-    model, preprocess = _create_unimed_model_with_torch_load_patch(unimed_open_clip=unimed_open_clip, model_name=model_name, checkpoint_path=checkpoint_path, device=device, mean=mean, std=std, text_encoder_name=text_encoder_name)
-
-    tokenizer = unimed_open_clip.HFTokenizer(text_encoder_name, context_length=256)
+        model, preprocess = _create_unimed_model_with_torch_load_patch(unimed_open_clip=unimed_open_clip, model_name=model_name, checkpoint_path=checkpoint_path, device=device, mean=mean, std=std, text_encoder_name=text_encoder_name)
+        tokenizer = unimed_open_clip.HFTokenizer(text_encoder_name, context_length=256)
 
     model.eval().float()
 

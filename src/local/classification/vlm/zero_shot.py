@@ -32,7 +32,7 @@ def build_text_embeddings(model, tokenizer, prompt_registry, class_names, device
             # Normalise each prompt embedding.
             text_features = F.normalize(text_features, dim=-1)
 
-            # Average the eight prompts into one class prototype.
+            # Average the prompt ensemble into one class prototype.
             class_embedding = text_features.mean(dim=0)
 
             # Normalise after averaging.
@@ -167,7 +167,7 @@ class ZeroShotEvaluator:
     def print_results(self, metrics, model_name='CLIP'):
         print(f'\nZero-Shot Results: {model_name}')
         print(f"accuracy - {metrics['accuracy']:.4f}")
-        print(f"balanced Accuracy - {metrics['balanced_accuracy']:.4f}")
+        print(f"balanced accuracy - {metrics['balanced_accuracy']:.4f}")
         print(f"macro F1 - {metrics['macro_f1']:.4f}")
         print(f"AUC - {metrics['auc']:.4f}")
         print(f"\nper-class F1 -")
