@@ -5,44 +5,49 @@ import re
 import shutil
 import subprocess
 import sys
-import time
 import urllib.request
 
 '''
-BUSSAM is used here for BUSI segmentation/localisation. The segmentation target is background vs lesion. 
+BUSSAM is used here for BUSI segmentation/localisation. The segmentation target is background and lesion. 
+Referred to the original BUSSAM paper and code so the training settings match the benchmark setup.
+See: https://arxiv.org/html/2404.14837v1
+See: https://github.com/bscs12/BUSSAM
 '''
 
 # Finds the main project folder so paths work from helper .py files not notebooks.
-def get_repo_root():
+def find_project_root():
     return next(p for p in Path(__file__).resolve().parents if (p / '.git').exists())
 
-def _sanitize_busi_name(name):
+# A helper function to create BUSI filenames for the required BUSSAM dataset.
+def clean_busi_name(name):
     return re.sub(r'[^A-Za-z0-9_.-]+', '_', name).strip('_')
 
-def _link_or_copy_file(source, destination):
+# Copy every BUSI image or mask into the BUSSAM dataset folders.
+def copy_file(source, destination):
     destination.parent.mkdir(parents=True, exist_ok=True)
+
     if destination.exists():
         destination.unlink()
-    try:
-        os.link(source, destination)
-        return 'linked'
-    except OSError:
-        shutil.copyfile(source, destination)
-        return 'copied'
+    
+    shutil.copyfile(source, destination)
 
-def _bussam_output_path(bussam_root, output_path):
-    output_dir = Path(output_path)
-    if output_dir.is_absolute():
-        return output_dir
-    return bussam_root / output_dir
+# A helper function to keep BUSSAM file paths pointing to the correct folder.
+def resolve_bussam_path(bussam_root, output_path):
+    output_directory = Path(output_path)
 
-# Points to the cloned BUSSAM repo inside the external folder.
-def get_bussam_root():
-    return get_repo_root() / 'external' / 'BUSSAM'
+    if output_directory.is_absolute():
+        return output_directory
+    
+    return bussam_root / output_directory
 
-# Used to clone the BUSSAM repository for training. Note: you can also do 'git clone https://github.com/bscs12/BUSSAM.git' direclty.
-def clone_bussam():
-    bussam = get_bussam_root()
+# Get the path to the cloned BUSSAM repo inside the external folder.
+def find_bussam_repo():
+    repo_path = find_project_root()/'external'/'BUSSAM'
+    return repo_path
+
+# Used to clone the BUSSAM repository for training. You can also run the git clone manually.
+def download_bussam_code():
+    bussam = find_bussam_repo()
     print(f'clone: exists = {bussam.exists()} path = {bussam}')
 
     if bussam.exists():
@@ -50,13 +55,14 @@ def clone_bussam():
     
     bussam.parent.mkdir(parents = True, exist_ok = True)
 
+    # Clone the official BUSSAM repository into the local external/BUSSAM folder.
     subprocess.run(['git', 'clone', 'https://github.com/bscs12/BUSSAM.git', str(bussam)], check = True)
 
     return bussam
 
-# Downloads the original SAM ViT-B checkpoint that BUSSAM needs before training.
-def download_sam_checkpoint():
-    bussam = get_bussam_root()
+# Download the pretrained SAM ViT-B weights used to initialise BUSSAM before BUSI segmentation training.
+def download_sam_vit_b_checkpoint():
+    bussam = find_bussam_repo()
     checkpoint = bussam / 'checkpoints' / 'sam_vit_b_01ec64.pth'
 
     print(f'sam checkpoint: exists = {checkpoint.exists()} path = {checkpoint}')
@@ -65,145 +71,108 @@ def download_sam_checkpoint():
         return checkpoint
     
     checkpoint.parent.mkdir(parents = True, exist_ok = True)
+
     urllib.request.urlretrieve('https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth', checkpoint)
 
     return checkpoint
 
 # Copies the BUSI split images and masks into the folder structure BUSSAM expects.
-def prepare_bussam_busi_dataset():
-    root = get_repo_root()
-    bussam = get_bussam_root()
-
-    split_root = root / 'dataset' / 'split'
-    out_img = bussam / 'datasets' / 'BUSI' / 'img'
-    out_label = bussam / 'datasets' / 'BUSI' / 'label'
-    out_main = bussam / 'datasets' / 'MainPatient'
-    manifest_path = out_main / 'BUSI_manifest.json'
-
-    out_img.mkdir(parents=True, exist_ok=True)
-    out_label.mkdir(parents=True, exist_ok=True)
-    out_main.mkdir(parents=True, exist_ok=True)
-
+def prepare_busi_for_bussam():
     classes = ['benign', 'malignant']
 
-    print(f'dataset: source = {split_root} classes = {classes}')
+    root = find_project_root()
+    bussam = find_bussam_repo()
+
+    split_root = root/'dataset'/'split'
+    out_image = bussam/'datasets'/'BUSI'/'img'
+    out_label = bussam/'datasets'/'BUSI'/'label'
+    out_main = bussam/'datasets'/'MainPatient'
+
+    # Create the dataset folders.
+    out_image.mkdir(parents = True, exist_ok = True)
+    out_label.mkdir(parents = True, exist_ok = True)
+    out_main.mkdir(parents = True, exist_ok = True)
+
+    print(f'dataset source = {split_root}')
+    print(f'dataset classes = {classes}')
 
     split_lists = {'train': [], 'val': [], 'test': []}
+
     file_plan = []
-    skipped_missing_masks = []
 
+    # Collect each image-mask pair from our existing split.
     for split in split_lists:
-        for cls in classes:
-            cls_dir = split_root / split / cls
+        for class_name in classes:
+            class_directory = split_root/split/class_name
 
-            if not cls_dir.exists():
+            if not class_directory.exists():
                 continue
 
-            for image_path in sorted(cls_dir.glob('*.png')):
+            for image_path in sorted(class_directory.glob('*.png')):
                 if '_mask' in image_path.stem:
                     continue
 
                 mask_path = image_path.with_name(f'{image_path.stem}_mask{image_path.suffix}')
-
-                if not mask_path.exists():
-                    skipped_missing_masks.append(str(image_path.relative_to(split_root)))
-                    continue
-
-                out_stem = _sanitize_busi_name(f'{cls}__{image_path.stem}')
+                out_stem = clean_busi_name(f'{class_name}__{image_path.stem}')
                 out_file = f'{out_stem}.png'
 
-                file_plan.append({
-                    'image_src': str(image_path.relative_to(root)).replace('\\', '/'),
-                    'mask_src': str(mask_path.relative_to(root)).replace('\\', '/'),
-                    'image_size': image_path.stat().st_size,
-                    'image_mtime_ns': image_path.stat().st_mtime_ns,
-                    'mask_size': mask_path.stat().st_size,
-                    'mask_mtime_ns': mask_path.stat().st_mtime_ns,
-                    'output_name': out_file,
-                })
+                file_plan.append({'image_src': str(image_path.relative_to(root)).replace('\\', '/'), 'mask_src': str(mask_path.relative_to(root)).replace('\\', '/'), 'output_name': out_file})
 
+                # BUSSAM uses a different split-file prefix for test samples.
                 if split == 'test':
                     split_lists[split].append(f'BUSI/{out_stem}')
+
                 else:
                     split_lists[split].append(f'1/BUSI/{out_stem}')
 
-    manifest = {
-        'classes': classes,
-        'counts': {split: len(names) for split, names in split_lists.items()},
-        'files': file_plan,
-    }
+    # Store the BUSSAM split-file path for each dataset split.
+    split_file_paths = {}
 
-    split_file_paths = {split: out_main / f'BUSI_{split}.txt' for split in split_lists}
-    required_outputs = [
-        *(out_img / item['output_name'] for item in file_plan),
-        *(out_label / item['output_name'] for item in file_plan),
-        *split_file_paths.values(),
-        out_main / 'class.json',
-    ]
+    for split in split_lists:
+        split_file_path = out_main / f'BUSI_{split}.txt'
+        split_file_paths[split] = split_file_path
 
-    if manifest_path.exists():
-        current_manifest = json.loads(manifest_path.read_text())
-        if current_manifest == manifest and all(path.exists() for path in required_outputs):
-            print(
-                'dataset: already prepared '
-                f'train/val/test={len(split_lists["train"])}/{len(split_lists["val"])}/{len(split_lists["test"])}'
-            )
-            return {
-                'img_dir': out_img,
-                'label_dir': out_label,
-                'split_files': split_file_paths,
-                'manifest_path': manifest_path,
-                'counts': manifest['counts'],
-            }
-
-    for png_file in out_img.glob('*.png'):
+    for png_file in out_image.glob('*.png'):
         png_file.unlink()
 
     for png_file in out_label.glob('*.png'):
         png_file.unlink()
 
-    link_mode = None
-
     for item in file_plan:
-        image_src = root / item['image_src']
-        mask_src = root / item['mask_src']
-        image_mode = _link_or_copy_file(image_src, out_img / item['output_name'])
-        mask_mode = _link_or_copy_file(mask_src, out_label / item['output_name'])
-        link_mode = image_mode if link_mode is None else link_mode
+        image_source = root/item['image_src']
+        mask_source = root/item['mask_src']
+        copy_file(image_source, out_image/item['output_name'])
+        copy_file(mask_source, out_label/item['output_name'])
 
-        if image_mode != mask_mode:
-            link_mode = 'mixed'
+    # Save the sample names.
+    for split in split_lists:
+        names = split_lists[split]
+        split_file_path = split_file_paths[split]
 
-    for split, names in split_lists.items():
-        split_file_paths[split].write_text('\n'.join(names) + ('\n' if names else ''))
+        file_text = '\n'.join(names)
+
+        if names:
+            file_text = file_text + '\n'
+
+        split_file_path.write_text(file_text)
 
     (out_main / 'class.json').write_text(json.dumps({'BUSI': 2}) + '\n')
-    manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
 
-    print(
-        f'dataset: train/val/test='
-        f'{len(split_lists["train"])}/'
-        f'{len(split_lists["val"])}/'
-        f'{len(split_lists["test"])}'
-    )
+    print(f'train/val/test = {len(split_lists["train"])}/{len(split_lists["val"])}/{len(split_lists["test"])}')
 
-    print(f'dataset: files {link_mode or "prepared"} for BUSSAM')
-
-    if skipped_missing_masks:
-        print(f'dataset: skipped {len(skipped_missing_masks)} images without masks')
+    print('files copied for BUSSAM.')
 
     return {
-        'img_dir': out_img,
+        'img_dir': out_image,
         'label_dir': out_label,
         'split_files': split_file_paths,
-        'manifest_path': manifest_path,
-        'counts': manifest['counts'],
+        'counts': {split: len(names) for split, names in split_lists.items()},
     }
 
-# I had to manually patch the config file because BUSSAM reads epochs and output paths from config.py.
-def patch_bussam_config(epochs=100, output_dir='outputs/'):
-    bussam = get_bussam_root()
-    config = bussam / 'utils' / 'config.py'
+# BUSSAM reads epochs and output paths from config.py. 
+def set_bussam_training_settings(epochs=100, output_dir='outputs/'):
+    bussam = find_bussam_repo()
+    config = bussam/'utils'/'config.py'
 
     print(f'config: epochs={epochs} output={output_dir}')
 
@@ -217,27 +186,28 @@ def patch_bussam_config(epochs=100, output_dir='outputs/'):
 
     return config
 
-def patch_bussam_repo_imports():
-    bussam = get_bussam_root()
+# We had to fix two import-path naming errors in the released BUSSAM code so the model could load.
+def fix_bussam_import_paths():
+    bussam = find_bussam_repo()
 
-    model_dict = bussam / 'models' / 'model_dict.py'
+    model_dict = bussam/'models'/'model_dict.py'
     text = model_dict.read_text()
 
-    text = text.replace(
-        'from models.segment_anything_bussam.build_sam_us import bussam_model_registry',
-        'from models.segment_anything_samus.build_sam_us import bussam_model_registry'
-    )
+    text = text.replace('from models.segment_anything_bussam.build_sam_us import bussam_model_registry', 'from models.segment_anything_samus.build_sam_us import bussam_model_registry')
 
     model_dict.write_text(text)
 
-    modeling_init = bussam / 'models' / 'segment_anything_samus' / 'modeling' / '__init__.py'
+    modeling_init = bussam/'models'/'segment_anything_samus'/'modeling'/'__init__.py'
     text = modeling_init.read_text()
 
-    text = text.replace(
-        'from .bussam import Bussam',
-        'from .samus import Bussam'
-    )
+    text = text.replace('from .bussam import Bussam', 'from .samus import Bussam')
+    
     modeling_init.write_text(text)
+
+    train_script = bussam/'train.py'
+    text = train_script.read_text()
+    text = text.replace('            print(train_loss)\n', '')
+    train_script.write_text(text)
 
     print('BUSSAM repo imports patched')
 
@@ -246,280 +216,67 @@ def patch_bussam_repo_imports():
         'modeling_init': modeling_init,
     }
 
-# Runs BUSSAM training on the BUSI segmentation task.
-def train_bussam(batch_size=4, base_lr=0.0005):
-    bussam = get_bussam_root()
+# Run a subprocess while streaming output back to notebooks immediately.
+def run_streamed_subprocess(command, cwd):
+    env = os.environ.copy()
+    env['PYTHONUNBUFFERED'] = '1'
+    output_lines = []
 
-    patch_bussam_repo_imports()
+    with subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env) as process:
+        stdout = process.stdout
 
+        if stdout is None:
+            raise RuntimeError('BUSSAM subprocess stdout was not available.')
 
-    if str(bussam) not in sys.path:
-        sys.path.insert(0, str(bussam))
+        for line in stdout:
+            print(line, end='', flush=True)
+            output_lines.append(line.rstrip('\n'))
 
-    import importlib
-    import random
+        return_code = process.wait()
 
-    import numpy as np
-    import torch
-    import torch.optim as optim
-    from torch import nn
-    from torch.utils.data import DataLoader
-    from tqdm.auto import tqdm
+    output_text = '\n'.join(output_lines)
+    result = subprocess.CompletedProcess(command, return_code, stdout=output_text)
 
-    bussam_config = importlib.import_module('utils.config')
+    if return_code != 0:
+        raise subprocess.CalledProcessError(return_code, command, output=output_text)
 
-    importlib.reload(bussam_config)
+    return result
 
-    evaluation = importlib.import_module('utils.evaluation')
-    get_model = importlib.import_module('models.model_dict').get_model
-    data_us = importlib.import_module('utils.data_us')
-    get_criterion = importlib.import_module('utils.loss_functions.sam_loss').get_criterion
-    get_click_prompt = importlib.import_module('utils.generate_prompts').get_click_prompt
+# Extract per-epoch training metrics from BUSSAM's stdout.
+def parse_bussam_training_history(output_text):
+    history_by_epoch = {}
+    train_pattern = re.compile(r'epoch:(\d+)/(\d+), train_loss:([0-9.eE+-]+)')
+    val_pattern = re.compile(r'epoch:(\d+)/(\d+), val_loss:([0-9.eE+-]+), val_dice:([0-9.eE+-]+)')
 
-    class Args:
-        modelname = 'BUSSAM'
-        encoder_input_size = 256
-        low_image_size = 128
-        task = 'BUSI'
-        vit_name = 'vit_b'
-        sam_ckpt = 'checkpoints/sam_vit_b_01ec64.pth'
-        n_gpu = 1
-        warmup = True
-        warmup_period = 250
+    for line in output_text.splitlines():
+        train_match = train_pattern.search(line)
 
-    args = Args()
-    args.sam_ckpt = str((bussam / args.sam_ckpt).resolve())
-    opt = bussam_config.get_config(args.task)
-    opt.data_path = str(_bussam_output_path(bussam, opt.data_path).resolve())
-    opt.batch_size = batch_size * args.n_gpu
-    device = torch.device(opt.device)
+        if train_match:
+            epoch = int(train_match.group(1))
+            history_by_epoch.setdefault(epoch, {'epoch': epoch, 'val_loss': None, 'val_dice': None})
+            history_by_epoch[epoch]['train_loss'] = float(train_match.group(3))
+            continue
 
-    seed_value = 1234
-    np.random.seed(seed_value)
-    random.seed(seed_value)
-    os.environ['PYTHONHASHSEED'] = str(seed_value)
-    torch.manual_seed(seed_value)
+        val_match = val_pattern.search(line)
 
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed_value)
-        torch.cuda.manual_seed_all(seed_value)
+        if val_match:
+            epoch = int(val_match.group(1))
+            history_by_epoch.setdefault(epoch, {'epoch': epoch, 'train_loss': None})
+            history_by_epoch[epoch]['val_loss'] = float(val_match.group(3))
+            history_by_epoch[epoch]['val_dice'] = float(val_match.group(4))
 
-    torch.backends.cudnn.deterministic = True
+    return [history_by_epoch[epoch] for epoch in sorted(history_by_epoch)]
 
-    timestr = time.strftime('%m%d%H%M%S')
-    save_dir = _bussam_output_path(bussam, opt.output_path) / f'{args.modelname}_{timestr}'
-    checkpoint_dir = save_dir / 'checkpoints'
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+# Function used to train BUSSAM on the BUSI segmentation task.
+# We use the same settings as the arXiv paper benchmark including 256x256 input size, 128x128 low mask, batch size 8, 100 epochs, AdamW, 5e-4 learning rate, warmup, and decay.
+def train_bussam_on_busi(batch_size = 8, base_lr = 0.0005):
+    bussam = find_bussam_repo()
 
-    model = get_model(args.modelname, args=args, opt=opt)
-    model.to(device)
+    fix_bussam_import_paths()
+    set_bussam_script_gpu('train.py', '0')
 
-    if opt.pre_trained:
-        checkpoint = torch.load(opt.load_path, map_location=device)
-        new_state_dict = {}
-
-        for key, value in checkpoint.items():
-            if key.startswith('module.'):
-                new_state_dict[key[7:]] = value
-            else:
-                new_state_dict[key] = value
-
-        model.load_state_dict(new_state_dict)
-
-    if args.n_gpu > 1:
-        model = nn.DataParallel(model)
-
-    tf_train = data_us.JointTransform2D(
-        img_size=args.encoder_input_size,
-        low_img_size=args.low_image_size,
-        ori_size=opt.img_size,
-        crop=opt.crop,
-        p_flip=0.0,
-        p_rota=0.5,
-        p_scale=0.5,
-        p_gaussn=0.0,
-        p_contr=0.5,
-        p_gama=0.5,
-        p_distor=0.0,
-        color_jitter_params=None,
-        long_mask=True,
-    )
-
-    tf_val = data_us.JointTransform2D(
-        img_size=args.encoder_input_size,
-        low_img_size=args.low_image_size,
-        ori_size=opt.img_size,
-        crop=opt.crop,
-        p_flip=0,
-        color_jitter_params=None,
-        long_mask=True,
-    )
-
-    train_dataset = data_us.ImageToImage2D(opt.data_path, opt.train_split, tf_train, img_size=args.encoder_input_size)
-    val_dataset = data_us.ImageToImage2D(opt.data_path, opt.val_split, tf_val, img_size=args.encoder_input_size)
-
-    pin_memory = torch.cuda.is_available() and device.type == 'cuda'
-    trainloader = DataLoader(train_dataset, batch_size=opt.batch_size, shuffle=True, num_workers=0, pin_memory=pin_memory)
-    valloader = DataLoader(val_dataset, batch_size=opt.batch_size, shuffle=False, num_workers=0, pin_memory=pin_memory)
-
-    if args.warmup:
-        lr_start = base_lr / args.warmup_period
-        optimizer = torch.optim.AdamW(
-            filter(lambda p: p.requires_grad, model.parameters()),
-            lr=lr_start,
-            betas=(0.9, 0.999),
-            weight_decay=0.1,
-        )
-    else:
-        optimizer = optim.Adam(
-            model.parameters(),
-            lr=base_lr,
-            betas=(0.9, 0.999),
-            eps=1e-08,
-            weight_decay=0,
-            amsgrad=False,
-        )
-
-    criterion = get_criterion(modelname=args.modelname, opt=opt)
-
-    print('Total_params:{}'.format(sum(p.numel() for p in model.parameters() if p.requires_grad)))
-
-    history = []
-    iter_num = 0
-    max_iterations = opt.epochs * len(trainloader)
-    best_dice = float('-inf')
-    best_checkpoint = None
-
-    for epoch in range(opt.epochs):
-        model.train()
-        train_losses = 0.0
-        train_batches = 0
-
-        progress_bar = tqdm(
-            trainloader,
-            desc=f"Epoch {epoch + 1}/{opt.epochs}",
-            leave=True
-        )
-
-        for batch_idx, datapack in enumerate(progress_bar):
-            train_batches = batch_idx + 1
-            imgs = datapack['image'].to(dtype=torch.float32, device=opt.device)
-            masks = datapack['low_mask'].to(dtype=torch.float32, device=opt.device)
-
-            bbox = torch.as_tensor(datapack['bbox'], dtype=torch.float32, device=opt.device)
-            pt = get_click_prompt(datapack, opt)
-
-            pred = model(imgs, pt, bbox)
-            train_loss = criterion(pred, masks)
-
-            optimizer.zero_grad()
-            train_loss.backward()
-            optimizer.step()
-
-            train_losses += train_loss.item()
-
-            if args.warmup and iter_num < args.warmup_period:
-                lr_value = base_lr * ((iter_num + 1) / args.warmup_period)
-                for param_group in optimizer.param_groups:
-                    param_group['lr'] = lr_value
-
-            elif args.warmup:
-                shift_iter = iter_num - args.warmup_period
-                lr_value = base_lr * (1.0 - shift_iter / max_iterations) ** 0.9
-
-                for param_group in optimizer.param_groups:
-                    param_group['lr'] = lr_value
-
-            else:
-                lr_value = optimizer.param_groups[0]['lr']
-
-            running_loss = train_losses / train_batches
-            progress_bar.set_postfix(
-                loss=f"{running_loss:.4f}",
-                lr=f"{lr_value:.2e}"
-            )
-
-            iter_num += 1
-
-        train_loss_epoch = train_losses / max(train_batches, 1)
-
-        opt.mode = 'train'
-        _, val_dice, _, val_loss = evaluation.get_eval(valloader, model, criterion=criterion, opt=opt, args=args)
-        opt.mode = 'test'
-        _, _, val_iou, val_acc, val_se, val_sp, *_ = evaluation.get_eval(valloader, model, criterion=criterion, opt=opt, args=args)
-        opt.mode = 'train'
-
-        epoch_metrics = {
-            'epoch': epoch + 1,
-            'learning_rate': float(optimizer.param_groups[0]['lr']),
-            'train_loss': float(train_loss_epoch),
-            'val_loss': float(val_loss),
-            'val_dice': float(np.mean(val_dice[1:]) if hasattr(val_dice, '__len__') else val_dice),
-            'val_iou': float(np.mean(val_iou[1:]) if hasattr(val_iou, '__len__') else val_iou),
-            'val_accuracy': float(np.mean(val_acc[1:]) if hasattr(val_acc, '__len__') else val_acc),
-            'val_sensitivity': float(np.mean(val_se[1:]) if hasattr(val_se, '__len__') else val_se),
-            'val_specificity': float(np.mean(val_sp[1:]) if hasattr(val_sp, '__len__') else val_sp),
-        }
-
-        history.append(epoch_metrics)
-
-        print(
-            f"epoch {epoch + 1:03d}/{opt.epochs} - "
-            f"train_loss={epoch_metrics['train_loss']:.4f} - "
-            f"val_loss={epoch_metrics['val_loss']:.4f} - "
-            f"val_dice={epoch_metrics['val_dice']:.2f} - "
-            f"val_acc={epoch_metrics['val_accuracy']:.2f} - "
-            f"lr={epoch_metrics['learning_rate']:.6f}",
-            flush=True
-        )
-
-        if epoch_metrics['val_dice'] > best_dice:
-            best_dice = epoch_metrics['val_dice']
-            checkpoint_timestr = time.strftime('%m%d%H%M')
-            best_checkpoint = checkpoint_dir / f"{args.modelname}_{checkpoint_timestr}_{epoch + 1}_{best_dice}.pth"
-            torch.save(model.state_dict(), best_checkpoint, _use_new_zipfile_serialization=False)
-
-        if (epoch + 1) % opt.save_freq == 0 or (epoch + 1) == opt.epochs:
-            torch.save(model.state_dict(), checkpoint_dir / f'{args.modelname}_{epoch + 1}.pth', _use_new_zipfile_serialization=False)
-
-    history_path = save_dir / 'history.json'
-    history_path.write_text(json.dumps(history, indent=2) + '\n')
-
-    return {
-        'save_dir': save_dir,
-        'checkpoint_dir': checkpoint_dir,
-        'history_path': history_path,
-        'best_checkpoint': best_checkpoint,
-        'history': history,
-    }
-
-# Finds the newest trained checkpoint after BUSSAM has saved model weights.
-def find_latest_checkpoint():
-    bussam = get_bussam_root()
-    checkpoints = sorted((bussam / 'outputs').glob('**/*.pth'), key=lambda p: p.stat().st_mtime, reverse=True)
-
-    return checkpoints[0] if checkpoints else None
-
-def patch_bussam_test_config(checkpoint):
-    bussam = get_bussam_root()
-    config = bussam / 'utils' / 'config.py'
-
-    text = config.read_text()
-    checkpoint = str(checkpoint).replace('\\', '/')
-
-    text = re.sub(r'load_path\s*=\s*[\'"].*?[\'"]', f'load_path = \'{checkpoint}\'', text)
-    text = re.sub(r'visual\s*=\s*False', 'visual = True', text)
-
-    config.write_text(text)
-
-    return config
-
-# Runs BUSSAM testing after training.
-def test_bussam(batch_size=4):
-    bussam = get_bussam_root()
-
-    subprocess.run([
-        sys.executable, 'test.py',
+    command = [
+        sys.executable, '-u', 'train.py',
         '--task', 'BUSI',
         '--modelname', 'BUSSAM',
         '--encoder_input_size', '256',
@@ -527,5 +284,103 @@ def test_bussam(batch_size=4):
         '--vit_name', 'vit_b',
         '--sam_ckpt', 'checkpoints/sam_vit_b_01ec64.pth',
         '--batch_size', str(batch_size),
+        '--base_lr', str(base_lr),
         '--n_gpu', '1',
-    ], cwd=bussam, check=True)
+    ]
+
+    result = run_streamed_subprocess(command, cwd = bussam)
+    best_checkpoint = find_best_bussam_checkpoint()
+    history = parse_bussam_training_history(result.stdout)
+
+    return {'result': result, 'best_checkpoint': best_checkpoint, 'history': history}
+
+# We select the checkpoint with the highest validation Dice score.
+def find_best_bussam_checkpoint():
+    bussam = find_bussam_repo()
+    checkpoints = list((bussam / 'outputs').glob('**/checkpoints/BUSSAM_*.pth'))
+
+    scored = []
+
+    for checkpoint in checkpoints:
+        match = re.search(r'BUSSAM_\d+_(\d+)_(\d+(?:\.\d+)?)\.pth$', checkpoint.name)
+
+        if match:
+            scored.append((float(match.group(2)), int(match.group(1)), checkpoint))
+
+    if scored:
+        scored.sort(reverse=True)
+        return scored[0][2]
+
+    return find_latest_bussam_checkpoint()
+
+# Find the most recently saved BUSSAM checkpoint.
+def find_latest_bussam_checkpoint():
+    bussam = find_bussam_repo()
+    checkpoint_files = list((bussam / 'outputs').glob('**/checkpoints/BUSSAM_*.pth'))
+
+    if not checkpoint_files:
+        return None
+
+    latest_checkpoint = max(checkpoint_files, key=lambda p: p.stat().st_mtime)
+
+    return latest_checkpoint
+
+# Change the GPU selected inside a BUSSAM script before it is run.
+def set_bussam_script_gpu(script_name, gpu_id="0"):
+    script = find_bussam_repo() / script_name
+    text = script.read_text()
+
+    text = re.sub(r"os\.environ\[['\"]CUDA_VISIBLE_DEVICES['\"]\]\s*=\s*['\"].*?['\"]", f"os.environ['CUDA_VISIBLE_DEVICES'] = '{gpu_id}'", text)
+
+    script.write_text(text)
+    return script
+
+# I set the GPU used by BUSSAM's test script.
+def set_bussam_test_gpu(gpu_id="0"):
+    return set_bussam_script_gpu('test.py', gpu_id)
+
+# Update BUSSAM's test settings to use our selected checkpoint and device.
+def set_bussam_test_settings(checkpoint, device="cuda", visual=True):
+    bussam = find_bussam_repo()
+    config = bussam / "utils" / "config.py"
+
+    text = config.read_text()
+    checkpoint = str(checkpoint).replace("\\", "/")
+
+    # Point BUSSAM to the trained model selected for evaluation.
+    text = re.sub(r"load_path\s*=\s*['\"].*?['\"]", f"load_path = '{checkpoint}'", text)
+    # Set whether testing runs on the GPU or CPU.
+    text = re.sub(r"device\s*=\s*['\"].*?['\"]", f"device = '{device}'", text)
+    # Turn predicted-mask visualisations on or off.
+    text = re.sub(r"visual\s*=\s*(True|False)", f"visual = {visual}", text)
+
+    config.write_text(text)
+
+    return config
+
+# Run BUSSAM on the BUSI test split using the selected trained checkpoint.
+def test_bussam_on_busi(checkpoint, batch_size = 8, device = 'cuda'):
+    bussam = find_bussam_repo()
+    fix_bussam_import_paths()
+
+    # I set this to use my first GPU.
+    set_bussam_test_gpu('0')
+
+    checkpoint = Path(checkpoint)
+
+    set_bussam_test_settings(checkpoint, device = device, visual = True)
+
+    # Adjusted SAM ViT-B settings.
+    command = [
+        sys.executable, "-u", "test.py",
+        "--task", "BUSI",
+        "--modelname", "BUSSAM",
+        "--encoder_input_size", "256",
+        "--low_image_size", "128",
+        "--vit_name", "vit_b",
+        "--sam_ckpt", "checkpoints/sam_vit_b_01ec64.pth",
+        "--batch_size", str(batch_size),
+        "--n_gpu", "1",
+    ]
+
+    return run_streamed_subprocess(command, cwd = bussam)

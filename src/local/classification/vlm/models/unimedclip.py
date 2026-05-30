@@ -49,6 +49,7 @@ def _resolve_unimed_project_root(project_root=None):
     if (cwd.parent / 'external' / 'UniMed-CLIP' / 'src').exists():
         return cwd.parent
 
+    # Error.
     raise FileNotFoundError(
         f'unimed source not found in any candidate location:\n'
         f'- {repo_root / "external" / "UniMed-CLIP" / "src"}\n'
@@ -66,50 +67,23 @@ def _resolve_unimed_checkpoint(project_root):
     if checkpoint_path.exists():
         return checkpoint_path
 
-    return Path(
-        hf_hub_download(
-            repo_id='UzairK/unimed-clip-vit-b16',
-            filename='unimed-clip-vit-b16.pt',
-            local_dir=checkpoint_dir,
-            local_dir_use_symlinks=False,
-        )
-    )
+    return Path(hf_hub_download(repo_id='UzairK/unimed-clip-vit-b16', filename='unimed-clip-vit-b16.pt', local_dir=checkpoint_dir, local_dir_use_symlinks=False))
 
-def _create_unimed_model_with_torch_load_patch(
-    unimed_open_clip,
-    model_name,
-    checkpoint_path,
-    device,
-    mean,
-    std,
-    text_encoder_name,
-):
-    '''
-    UniMed-CLIP checkpoints need weights_only=False with newer PyTorch versions.
-    This patch is local to model creation and avoids editing external/UniMed-CLIP.
-    '''
+
+# UniMed-CLIP checkpoints need weights_only = False with newer PyTorch versions.
+def _create_unimed_model_with_torch_load_patch(unimed_open_clip, model_name, checkpoint_path, device, mean, std, text_encoder_name):
     original_torch_load = torch.load
 
     def torch_load_compat(*args, **kwargs):
         if 'weights_only' not in kwargs:
             kwargs['weights_only'] = False
+
         return original_torch_load(*args, **kwargs)
 
     try:
         torch.load = torch_load_compat
 
-        model, _, preprocess = unimed_open_clip.create_model_and_transforms(
-            model_name,
-            str(checkpoint_path),
-            precision='fp32',
-            device=device,
-            force_quick_gelu=True,
-            pretrained_image=False,
-            mean=mean,
-            std=std,
-            inmem=True,
-            text_encoder_name=text_encoder_name,
-        )
+        model, _, preprocess = unimed_open_clip.create_model_and_transforms(model_name, str(checkpoint_path), precision='fp32', device=device, force_quick_gelu=True, pretrained_image=False, mean=mean, std=std, inmem=True, text_encoder_name=text_encoder_name)
 
     finally:
         torch.load = original_torch_load
@@ -128,32 +102,17 @@ def load_unimedclip(device='cuda', project_root=None):
     mean = (0.48145466, 0.4578275, 0.40821073)
     std = (0.26862954, 0.26130258, 0.27577711)
 
-    model, preprocess = _create_unimed_model_with_torch_load_patch(
-        unimed_open_clip=unimed_open_clip,
-        model_name=model_name,
-        checkpoint_path=checkpoint_path,
-        device=device,
-        mean=mean,
-        std=std,
-        text_encoder_name=text_encoder_name,
-    )
+    model, preprocess = _create_unimed_model_with_torch_load_patch(unimed_open_clip=unimed_open_clip, model_name=model_name, checkpoint_path=checkpoint_path, device=device, mean=mean, std=std, text_encoder_name=text_encoder_name)
 
-    tokenizer = unimed_open_clip.HFTokenizer(
-        text_encoder_name,
-        context_length=256,
-    )
+    tokenizer = unimed_open_clip.HFTokenizer(text_encoder_name, context_length=256)
 
     model.eval().float()
 
     return model, preprocess, tokenizer
 
-def make_unimedclip_loader(device='cuda', project_root=None):
+def make_unimedclip_loader(device = 'cuda', project_root = None):
     def loader():
-        model, preprocess, _ = load_unimedclip(
-            device=device,
-            project_root=project_root,
-        )
-
+        model, preprocess, _ = load_unimedclip(device=device, project_root=project_root)
         return model, preprocess
 
     return loader
